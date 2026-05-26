@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from typing import Optional
@@ -8,20 +9,35 @@ import tomli_w
 CONFIG_DIR = Path.home() / ".config" / "yadisk_cli"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 TOKEN_PATH = CONFIG_DIR / "token.json"
+ACCOUNTS_DIR = CONFIG_DIR / "accounts"
 
 DEFAULT_CONFIG = {
     "download_dir": str(Path.home() / "Downloads"),
     "yandex_client_id": "",
     "yandex_client_secret": "",
+    "active_account": "",
 }
 
 
 def ensure_config_dir():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _migrate_old_token():
+    if TOKEN_PATH.exists():
+        data = json.loads(TOKEN_PATH.read_text())
+        with open(get_token_path("default"), "w") as f:
+            json.dump(data, f)
+        TOKEN_PATH.unlink()
+        config = load_config()
+        config["active_account"] = "default"
+        save_config(config)
 
 
 def load_config() -> dict:
     ensure_config_dir()
+    _migrate_old_token()
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "rb") as f:
             return {**DEFAULT_CONFIG, **tomllib.load(f)}
@@ -44,9 +60,32 @@ def set_download_dir(path: str):
     save_config(config)
 
 
-def save_token(token_data):
+def get_active_account() -> str:
+    config = load_config()
+    return config.get("active_account", "") or ""
+
+
+def set_active_account(name: str):
+    config = load_config()
+    config["active_account"] = name
+    save_config(config)
+
+
+def get_token_path(name: str) -> Path:
+    return ACCOUNTS_DIR / f"{name}.json"
+
+
+def list_accounts() -> list[str]:
     ensure_config_dir()
-    import json
+    names = []
+    for f in sorted(ACCOUNTS_DIR.iterdir()):
+        if f.suffix == ".json":
+            names.append(f.stem)
+    return names
+
+
+def save_token(token_data, name: str):
+    ensure_config_dir()
     if hasattr(token_data, "__annotations__"):
         data = {}
         for field in token_data.__annotations__:
@@ -55,18 +94,28 @@ def save_token(token_data):
                 data[field] = val
     else:
         data = dict(token_data)
-    with open(TOKEN_PATH, "w") as f:
+    path = get_token_path(name)
+    with open(path, "w") as f:
         json.dump(data, f)
 
 
-def load_token() -> Optional[dict]:
-    if TOKEN_PATH.exists():
-        import json
-        with open(TOKEN_PATH) as f:
+def load_token(name: Optional[str] = None) -> Optional[dict]:
+    if name is None:
+        name = get_active_account()
+    if not name:
+        return None
+    path = get_token_path(name)
+    if path.exists():
+        with open(path) as f:
             return json.load(f)
     return None
 
 
-def delete_token():
-    if TOKEN_PATH.exists():
-        TOKEN_PATH.unlink()
+def delete_token(name: Optional[str] = None):
+    if name is None:
+        name = get_active_account()
+    if not name:
+        return
+    path = get_token_path(name)
+    if path.exists():
+        path.unlink()

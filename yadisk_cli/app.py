@@ -10,11 +10,11 @@ from textual.widgets import Input, Button, Label
 from textual.screen import ModalScreen
 
 from yadisk_cli.client import get_async_client
-from yadisk_cli.config import get_download_dir, set_download_dir as save_download_dir
+from yadisk_cli.config import get_download_dir, set_download_dir as save_download_dir, get_active_account, set_active_account
 from yadisk_cli.widgets.file_browser import FileBrowser, FileItem
 from yadisk_cli.widgets.file_preview import FilePreview
 from yadisk_cli.widgets.footer import Footer
-from yadisk_cli.widgets.dialogs import PathInputDialog
+from yadisk_cli.widgets.dialogs import PathInputDialog, AccountListScreen
 
 
 class YadiskApp(App):
@@ -60,7 +60,7 @@ class YadiskApp(App):
     }
 
     .dialog {
-        width: 50;
+        width: 80;
         height: auto;
         border: thick $primary;
         background: $surface;
@@ -77,10 +77,25 @@ class YadiskApp(App):
         align: center middle;
         padding-top: 1;
     }
+
+    .error-text {
+        color: $error;
+        padding: 0 1;
+    }
+
+    #token-help {
+        padding: 0 0 1 0;
+    }
+
+    #account-hint {
+        padding: 0 1;
+        height: 1;
+    }
     """
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit"),
+        Binding("ctrl+a", "accounts", "Accounts"),
         Binding("r", "refresh", "Refresh"),
         Binding("d", "download", "Download"),
         Binding("D", "download_to", "Download to..."),
@@ -90,9 +105,10 @@ class YadiskApp(App):
         Binding("h", "go_up", "Up"),
     ]
 
-    def __init__(self, client, download_dir: Optional[str] = None):
+    def __init__(self, client, account_name: str = "", download_dir: Optional[str] = None):
         super().__init__()
         self._client = client
+        self._account_name = account_name or get_active_account()
         self._selected_item: Optional[FileItem] = None
         self._download_dir = download_dir or get_download_dir()
         self._downloading = False
@@ -122,10 +138,40 @@ class YadiskApp(App):
             free = total - used
             fmt = f"💾 {_fmt_size(free)} / {_fmt_size(total)}"
             self.query_one("#footer", Footer).update_info(
-                path="/", download_dir=self._download_dir, disk_info=fmt
+                path="/",
+                download_dir=self._download_dir,
+                disk_info=fmt,
+                account_name=self._account_name,
             )
         except Exception:
             pass
+
+    async def action_accounts(self):
+        def on_account_result(result):
+            if result is None:
+                return
+            asyncio.create_task(self._switch_account(result))
+
+        self.push_screen(AccountListScreen(), callback=on_account_result)
+
+    async def _switch_account(self, name: str):
+        if name == self._account_name:
+            return
+        try:
+            await self._client.close()
+        except Exception:
+            pass
+        client = await get_async_client(name)
+        if client is None:
+            self.notify(f"Account '{name}' not authenticated", severity="error")
+            return
+        self._client = client
+        self._account_name = name
+        browser = self.query_one("#file-browser", FileBrowser)
+        browser._client = client
+        await browser.load_directory("/")
+        await self._update_disk_info()
+        self.notify(f"Switched to account '{name}'")
 
     async def on_list_view_highlighted(self, event):
         browser = self.query_one("#file-browser", FileBrowser)
@@ -140,7 +186,11 @@ class YadiskApp(App):
         preview = self.query_one("#file-preview", FilePreview)
         preview.show_item(item)
         footer = self.query_one("#footer", Footer)
-        footer.update_info(path=browser.current_path, download_dir=self._download_dir)
+        footer.update_info(
+            path=browser.current_path,
+            download_dir=self._download_dir,
+            account_name=self._account_name,
+        )
         event.stop()
 
     async def on_list_view_selected(self, event):
@@ -154,7 +204,11 @@ class YadiskApp(App):
 
         await browser.load_directory(item.item_path)
         footer = self.query_one("#footer", Footer)
-        footer.update_info(path=browser.current_path, download_dir=self._download_dir)
+        footer.update_info(
+            path=browser.current_path,
+            download_dir=self._download_dir,
+            account_name=self._account_name,
+        )
         event.stop()
 
     async def action_download(self):
@@ -213,7 +267,11 @@ class YadiskApp(App):
             if child.item_type == "dir":
                 await browser.load_directory(child.item_path)
                 footer = self.query_one("#footer", Footer)
-                footer.update_info(path=browser.current_path, download_dir=self._download_dir)
+                footer.update_info(
+                    path=browser.current_path,
+                    download_dir=self._download_dir,
+                    account_name=self._account_name,
+                )
             elif child.item_type == "file":
                 self._selected_item = child
                 preview = self.query_one("#file-preview", FilePreview)
@@ -277,6 +335,7 @@ class YadiskApp(App):
                 self.query_one("#footer", Footer).update_info(
                     path=self.query_one("#file-browser", FileBrowser).current_path,
                     download_dir=self._download_dir,
+                    account_name=self._account_name,
                 )
                 self.notify(f"Download dir set to: {self._download_dir}")
             else:

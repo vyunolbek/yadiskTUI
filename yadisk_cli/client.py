@@ -2,11 +2,13 @@ from typing import AsyncIterator, Optional
 
 from yadisk import AsyncClient
 
-from yadisk_cli.config import load_token
+from yadisk_cli.config import load_token, get_active_account
 
 
-async def get_async_client() -> Optional[AsyncClient]:
-    token_data = load_token()
+async def get_async_client(account_name: Optional[str] = None) -> Optional[AsyncClient]:
+    if account_name is None:
+        account_name = get_active_account()
+    token_data = load_token(account_name)
     if token_data is None:
         return None
     token = token_data.get("access_token")

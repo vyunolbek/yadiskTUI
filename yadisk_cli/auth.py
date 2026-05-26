@@ -2,11 +2,18 @@ from typing import Optional
 
 import yadisk
 
-from yadisk_cli.config import load_config, save_token, load_token, delete_token
+from yadisk_cli.config import (
+    load_config,
+    save_token,
+    load_token,
+    delete_token,
+    set_active_account,
+    get_active_account,
+)
 
 
-def get_client_from_token() -> Optional[yadisk.Client]:
-    token_data = load_token()
+def get_client_from_token(account_name: Optional[str] = None) -> Optional[yadisk.Client]:
+    token_data = load_token(account_name)
     if token_data is None:
         return None
     token = token_data.get("access_token")
@@ -18,27 +25,20 @@ def get_client_from_token() -> Optional[yadisk.Client]:
             if token_data.get("refresh_token"):
                 try:
                     new_token = client.refresh_token(token_data["refresh_token"])
-                    save_token(new_token)
+                    save_token(new_token, account_name or get_active_account())
                     client.token = new_token["access_token"]
                     if client.check_token():
                         return client
                 except Exception:
                     pass
-            delete_token()
+            delete_token(account_name)
             return None
     except Exception:
         return None
     return client
 
 
-def save_token_and_get_client(token_data) -> Optional[yadisk.Client]:
-    save_token(token_data)
-    client = yadisk.Client(token=token_data["access_token"])
-    print("Authentication successful!")
-    return client
-
-
-def login_with_token(token: str) -> Optional[yadisk.Client]:
+def login_with_token(token: str, account_name: str) -> Optional[yadisk.Client]:
     if not token:
         print("Error: OAuth token is required.")
         return None
@@ -47,15 +47,16 @@ def login_with_token(token: str) -> Optional[yadisk.Client]:
         if not client.check_token():
             print("Token is invalid or expired.")
             return None
-        save_token({"access_token": token})
-        print("Authentication successful!")
+        save_token({"access_token": token}, account_name)
+        set_active_account(account_name)
+        print(f"Authentication successful for account '{account_name}'!")
         return client
     except Exception as e:
         print(f"Authentication failed: {e}")
         return None
 
 
-def login_device_flow(client_id: str = "", client_secret: str = "") -> Optional[yadisk.Client]:
+def login_device_flow(client_id: str = "", client_secret: str = "", account_name: str = "default") -> Optional[yadisk.Client]:
     if not client_id:
         config = load_config()
         client_id = config.get("yandex_client_id", "")
@@ -84,7 +85,11 @@ def login_device_flow(client_id: str = "", client_secret: str = "") -> Optional[
             time.sleep(interval)
             try:
                 token_data = client.get_token_from_device_code(dc.device_code)
-                return save_token_and_get_client(token_data)
+                save_token(token_data, account_name)
+                set_active_account(account_name)
+                print(f"Authentication successful for account '{account_name}'!")
+                client.token = token_data["access_token"]
+                return client
             except yadisk.exceptions.AuthorizationPendingError:
                 continue
             except Exception as e:
