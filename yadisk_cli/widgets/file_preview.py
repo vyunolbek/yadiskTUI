@@ -1,4 +1,5 @@
 from textual.widgets import Static
+from textual.containers import Vertical
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
@@ -15,15 +16,31 @@ def format_size(size: int) -> str:
     return f"{size:.1f} PB"
 
 
-class FilePreview(Static):
-    def __init__(self, *args, **kwargs):
-        super().__init__("", *args, **kwargs)
-        self._current_item = None
+class FilePreview(Vertical):
+    CSS = """
+    #preview-info {
+        height: 1fr;
+    }
+
+    #downloads-container {
+        dock: bottom;
+        height: auto;
+        max-height: 50%;
+        overflow: auto;
+    }
+    """
+
+    def compose(self):
+        yield Static(id="preview-info")
+        yield Vertical(id="downloads-container")
+
+    def on_mount(self):
+        self.query_one("#preview-info", Static).update(Panel("No file selected", title="File Info"))
 
     def show_item(self, item=None):
-        self._current_item = item
+        info_widget = self.query_one("#preview-info", Static)
         if item is None:
-            self.update(Panel("No file selected", title="File Info"))
+            info_widget.update(Panel("No file selected", title="File Info"))
             return
 
         table = Table(show_header=False, box=None)
@@ -41,7 +58,7 @@ class FilePreview(Static):
                 Text("\n"),
                 Text("[D] Download to...", style="bold yellow"),
             )
-            self.update(Panel(content, title="Directory Info"))
+            info_widget.update(Panel(content, title="Directory Info"))
             return
 
         ext = item.item_name.rsplit(".", 1)[-1].upper() if "." in item.item_name else ""
@@ -61,7 +78,21 @@ class FilePreview(Static):
             Text("\n\n"),
             Text("Enter to download", style="dim"),
         )
-        self.update(Panel(content, title="File Info"))
+        info_widget.update(Panel(content, title="File Info"))
 
-    def show_message(self, message: str):
-        self.update(Panel(message, title="Status"))
+    def add_download(self, dl_id: str, text: str):
+        container = self.query_one("#downloads-container", Vertical)
+        widget = Static("", id=dl_id)
+        container.mount(widget)
+        self.update_download(dl_id, text)
+
+    def update_download(self, dl_id: str, text: str):
+        widget = self.query_one(f"#{dl_id}", Static)
+        widget.update(Panel(text, title="Download"))
+
+    def remove_download(self, dl_id: str):
+        try:
+            widget = self.query_one(f"#{dl_id}", Static)
+            widget.remove()
+        except Exception:
+            pass
