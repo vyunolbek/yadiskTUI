@@ -9,8 +9,10 @@ from textual.containers import Horizontal
 from textual.widgets import Input, Button, Label
 from textual.screen import ModalScreen
 
-from yadisk_cli.client import get_async_client
+from yadisk_cli.client import get_async_client, download_item_with_progress
+from yadisk_cli.progress import TransferTracker, DownloadCancelled
 from yadisk_cli.config import get_download_dir, set_download_dir as save_download_dir, get_active_account, set_active_account
+from yadisk_cli.update import get_current_version, check_latest_version, is_newer, do_update
 from yadisk_cli.widgets.file_browser import FileBrowser, FileItem
 from yadisk_cli.widgets.file_preview import FilePreview
 from yadisk_cli.widgets.footer import Footer
@@ -103,6 +105,7 @@ class YadiskApp(App):
         Binding("colon", "command_mode", "Command"),
         Binding("backspace", "go_up", "Up"),
         Binding("h", "go_up", "Up"),
+        Binding("u", "update", "Update"),
     ]
 
     def __init__(self, client, account_name: str = "", download_dir: Optional[str] = None):
@@ -112,6 +115,11 @@ class YadiskApp(App):
         self._selected_item: Optional[FileItem] = None
         self._download_dir = download_dir or get_download_dir()
         self._downloading = False
+        self._dl_tracker = TransferTracker()
+        self._dl_task = None
+        self._dl_progress_timer = None
+        self._dl_local_path = ""
+        self._dl_remote_path = ""
 
     def compose(self):
         with Horizontal(classes="horizontal-panels"):
@@ -123,6 +131,7 @@ class YadiskApp(App):
 
     async def on_mount(self):
         await self._update_disk_info()
+        asyncio.create_task(self._check_update())
 
     async def on_unmount(self):
         try:
@@ -212,53 +221,103 @@ class YadiskApp(App):
         event.stop()
 
     async def action_download(self):
-        if self._selected_item is None or self._selected_item.item_type != "file" or self._downloading:
+        if self._selected_item is None or self._downloading:
             return
-
-        self._downloading = True
-        try:
-            remote = self._selected_item.item_path
-            name = self._selected_item.item_name
-            local = os.path.join(self._download_dir, name)
-            await self._do_download(remote, local)
-        finally:
-            self._downloading = False
+        local = os.path.join(self._download_dir, self._selected_item.item_name)
+        self._start_download(self._selected_item.item_path, local)
 
     async def action_download_to(self):
-        if self._selected_item is None or self._selected_item.item_type != "file" or self._downloading:
+        if self._selected_item is None or self._downloading:
             return
 
         def on_path(path):
             if path is None:
                 return
-            browser = self.query_one("#file-browser", FileBrowser)
-            browser.focus()
-            self._downloading = True
+            self.query_one("#file-browser", FileBrowser).focus()
             path = os.path.expanduser(path)
             name = self._selected_item.item_name
             local = os.path.join(path, name) if os.path.isdir(path) else path
-            task = asyncio.create_task(self._do_download(self._selected_item.item_path, local))
-            task.add_done_callback(lambda _: setattr(self, "_downloading", False))
+            self._start_download(self._selected_item.item_path, local)
 
         self.push_screen(PathInputDialog("Download to:", default=self._download_dir), callback=on_path)
 
-    async def _do_download(self, remote_path: str, local_path: str):
+    def _start_download(self, remote_path: str, local_path: str):
+        preview = self.query_one("#file-preview", FilePreview)
+        preview.show_message(f"Starting download...\n{remote_path}\n→ {local_path}")
+        self._downloading = True
+        self._dl_remote_path = remote_path
+        self._dl_local_path = local_path
+        self._dl_tracker = TransferTracker()
+        self._dl_task = asyncio.create_task(
+            download_item_with_progress(self._client, remote_path, local_path, self._selected_item.item_type, self._dl_tracker)
+        )
+        self._dl_task.add_done_callback(self._on_download_done)
+        self._dl_progress_timer = self.set_interval(0.3, self._update_progress)
+
+    def _update_progress(self):
+        if self._dl_tracker.active:
+            lines = self._dl_tracker.status_lines()
+            self.query_one("#file-preview", FilePreview).show_message("\n".join(lines))
+
+    def _on_download_done(self, task):
+        if self._dl_progress_timer:
+            self._dl_progress_timer.stop()
+            self._dl_progress_timer = None
         try:
-            preview = self.query_one("#file-preview", FilePreview)
-            preview.show_message(f"Downloading...\n{remote_path}\n→ {local_path}")
-            os.makedirs(os.path.dirname(os.path.abspath(local_path)) or ".", exist_ok=True)
-            await self._client.download(remote_path, local_path)
-            preview.show_message(f"Download complete!\n{remote_path}\n→ {local_path}")
-            self.notify(f"Downloaded: {local_path}")
-            await asyncio.sleep(1.5)
-        except Exception as e:
-            self.notify(f"Download failed: {e}", severity="error")
-        finally:
+            task.result()
+        except (asyncio.CancelledError, DownloadCancelled):
+            pass
+        except Exception as exc:
+            self.notify(f"Download failed: {exc}", severity="error")
             if self._selected_item:
-                preview = self.query_one("#file-preview", FilePreview)
-                preview.show_item(self._selected_item)
-            browser = self.query_one("#file-browser", FileBrowser)
-            browser.focus()
+                self.query_one("#file-preview", FilePreview).show_item(self._selected_item)
+            self.query_one("#file-browser", FileBrowser).focus()
+            self._downloading = False
+            self._dl_task = None
+            return
+        preview = self.query_one("#file-preview", FilePreview)
+        if self._dl_tracker.cancelled:
+            preview.show_message("Download cancelled!")
+            self.notify("Download cancelled")
+            try:
+                os.remove(self._dl_local_path)
+            except OSError:
+                pass
+        else:
+            preview.show_message(f"Download complete!\n{self._dl_remote_path}\n→ {self._dl_local_path}")
+            self.notify(f"Downloaded: {self._dl_local_path}")
+        if self._selected_item:
+            preview = self.query_one("#file-preview", FilePreview)
+            preview.show_item(self._selected_item)
+        self.query_one("#file-browser", FileBrowser).focus()
+        self._downloading = False
+        self._dl_task = None
+
+    async def _check_update(self):
+        try:
+            latest = await asyncio.to_thread(check_latest_version)
+            if latest:
+                current = get_current_version()
+                if is_newer(latest, current):
+                    self.notify(
+                        f"Доступно обновление: {latest} (текущая: {current}). Нажми U для обновления",
+                        timeout=10,
+                    )
+        except Exception:
+            pass
+
+    async def action_update(self):
+        self.notify("Проверка обновлений...")
+        latest = await asyncio.to_thread(check_latest_version)
+        if latest:
+            current = get_current_version()
+            if not is_newer(latest, current):
+                self.notify(f"Уже последняя версия ({current})")
+                return
+            self.notify(f"Обновление до {latest}...")
+
+        result = await asyncio.to_thread(do_update)
+        self.notify(result)
 
     async def action_open_selected(self):
         browser = self.query_one("#file-browser", FileBrowser)
@@ -355,6 +414,10 @@ class YadiskApp(App):
                     child.display = query.lower() in child.item_name.lower()
 
     def key_escape(self):
+        if self._dl_tracker.active or self._downloading:
+            self._dl_tracker.cancel()
+            self.notify("Cancelling download...")
+            return
         bar = self.query_one("#command-bar")
         if bar.styles.visibility == "visible":
             bar.styles.visibility = "hidden"

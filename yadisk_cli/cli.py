@@ -16,6 +16,7 @@ from yadisk_cli.config import (
     list_accounts,
     get_token_path,
 )
+from yadisk_cli.update import get_current_version, check_latest_version, is_newer, do_update
 
 app = typer.Typer(invoke_without_command=True, no_args_is_help=False)
 
@@ -177,6 +178,26 @@ def config(
             typer.echo(cfg[key])
         else:
             typer.echo(f"Unknown key: {key}")
+
+
+@app.command()
+def update():
+    """Обновить yadisk-cli до последней версии"""
+    current = get_current_version()
+    typer.echo(f"Текущая версия: {current}")
+
+    latest = check_latest_version()
+    if latest is None:
+        typer.echo("Не удалось проверить наличие обновлений.")
+        if not typer.confirm("Продолжить обновление?", default=True):
+            raise typer.Exit()
+    elif not is_newer(latest, current):
+        typer.echo(f"Уже установлена последняя версия ({current}).")
+        return
+
+    typer.echo("Обновление...")
+    result = do_update()
+    typer.echo(result)
 
 
 def _fmt_size(size: int) -> str:

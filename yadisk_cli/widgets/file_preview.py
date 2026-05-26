@@ -34,7 +34,14 @@ class FilePreview(Static):
             table.add_row("Type", "📁 Directory")
             table.add_row("Name", item.item_name)
             table.add_row("Path", item.item_path)
-            self.update(Panel(table, title="Directory Info"))
+            content = Group(
+                table,
+                Text("\n\n"),
+                Text("[d] Download directory", style="bold green"),
+                Text("\n"),
+                Text("[D] Download to...", style="bold yellow"),
+            )
+            self.update(Panel(content, title="Directory Info"))
             return
 
         ext = item.item_name.rsplit(".", 1)[-1].upper() if "." in item.item_name else ""
