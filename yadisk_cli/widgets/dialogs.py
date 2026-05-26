@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import yadisk
 from rich.style import Style
@@ -7,6 +8,7 @@ from rich.text import Text
 from textual.screen import ModalScreen
 from textual.widgets import Input, Label, Button, ListView, ListItem, Static
 from textual.containers import Horizontal, Vertical
+from textual import events
 
 from yadisk_cli.config import (
     load_config,
@@ -21,18 +23,33 @@ from yadisk_cli.config import (
 
 
 class PathInputDialog(ModalScreen):
+    CSS = """
+    .suggestions-list {
+        height: auto;
+        max-height: 10;
+        border: solid $secondary;
+        margin: 0 0 1 0;
+        overflow-y: auto;
+    }
+    """
+
     def __init__(self, title: str, default: str = ""):
         super().__init__()
         self._dialog_title = title
         self._default = default
+        self._suggestions: list[str] = []
 
     def compose(self):
         with Vertical(classes="dialog"):
             yield Label(self._dialog_title, classes="dialog-title")
-            yield Input(value=self._default, placeholder="Enter path...")
+            yield Input(value=self._default, placeholder="Enter path...", id="path-input")
+            yield ListView(id="path-suggestions", classes="suggestions-list")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("OK", variant="primary", id="ok")
                 yield Button("Cancel", id="cancel")
+
+    def on_mount(self):
+        self._update_suggestions(self._default)
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "ok":
@@ -45,11 +62,98 @@ class PathInputDialog(ModalScreen):
         self._submit()
 
     def _submit(self):
-        path = self.query_one(Input).value.strip()
+        path = self.query_one("#path-input", Input).value.strip()
         if path:
             self.dismiss(path)
         else:
             self.dismiss()
+
+    def on_input_changed(self, event: Input.Changed):
+        if event.input.id == "path-input":
+            self._update_suggestions(event.value)
+
+    def on_list_view_selected(self, event: ListView.Selected):
+        lst = self.query_one("#path-suggestions", ListView)
+        if event.list_view is lst:
+            idx = lst.index
+            if idx is not None and 0 <= idx < len(self._suggestions):
+                self._complete_with(idx)
+            event.stop()
+
+    def _update_suggestions(self, path: str):
+        lst = self.query_one("#path-suggestions", ListView)
+        lst.clear()
+        self._suggestions.clear()
+
+        if not path:
+            parent = os.path.expanduser("~")
+            prefix = ""
+        else:
+            expanded = os.path.expanduser(path)
+            if os.path.isdir(expanded):
+                parent = expanded.rstrip("/") or "/"
+                prefix = ""
+            else:
+                parent = os.path.dirname(expanded) or "/"
+                prefix = os.path.basename(expanded)
+
+        if not os.path.isdir(parent):
+            return
+
+        try:
+            entries = sorted(os.listdir(parent))
+        except PermissionError:
+            return
+
+        matching = [e for e in entries if os.path.isdir(os.path.join(parent, e)) and e.startswith(prefix)]
+
+        for entry in matching:
+            lst.append(ListItem(Static(entry + "/")))
+
+        self._suggestions = matching
+
+        if matching:
+            lst.index = 0
+
+    def _complete_with(self, idx: int):
+        inp = self.query_one("#path-input", Input)
+        current = inp.value
+
+        if not current:
+            parent = os.path.expanduser("~")
+        else:
+            expanded = os.path.expanduser(current)
+            if os.path.isdir(expanded):
+                parent = expanded.rstrip("/") or "/"
+            else:
+                parent = os.path.dirname(expanded) or "/"
+
+        new_path = os.path.join(parent, self._suggestions[idx])
+        inp.value = new_path + "/"
+        self._update_suggestions(inp.value)
+        inp.focus()
+
+    def on_key(self, event: events.Key):
+        inp = self.query_one("#path-input", Input)
+        lst = self.query_one("#path-suggestions", ListView)
+
+        if self.focused is not inp or not self._suggestions:
+            return
+
+        if event.key == "up":
+            idx = lst.index
+            if idx is None or idx <= 0:
+                lst.index = len(self._suggestions) - 1
+            else:
+                lst.index = idx - 1
+            event.stop()
+        elif event.key == "down":
+            idx = lst.index
+            if idx is None or idx >= len(self._suggestions) - 1:
+                lst.index = 0
+            else:
+                lst.index = idx + 1
+            event.stop()
 
 
 class TokenInputScreen(ModalScreen):
